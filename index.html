@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>3D Void Interior Studio</title>
+<style>
+  body { margin:0; overflow:hidden; font-family:sans-serif; }
+  #toolsPanel {
+    position:absolute; top:0; right:-280px; width:280px; height:100%;
+    background: rgba(255,255,255,0.95); padding:10px; box-shadow:-2px 0 5px rgba(0,0,0,0.3);
+    transition:right 0.3s; overflow-y:auto;
+  }
+  #toolsPanel:hover { right:0; }
+  label { display:block; margin:10px 0 5px; }
+  #layerMenu button { display:block; margin-bottom:5px; width:100%; cursor:pointer; }
+</style>
+</head>
+<body>
+
+<div id="layerMenu">
+  <button onclick="switchLayer(0)">Layer 1</button>
+  <button onclick="switchLayer(1)">Layer 2</button>
+  <button onclick="switchLayer(2)">Layer 3</button>
+  <button onclick="undo()">Undo</button>
+  <button onclick="redo()">Redo</button>
+  <button onclick="saveScene()">Save</button>
+  <button onclick="loadScene()">Load</button>
+</div>
+
+<div id="toolsPanel">
+  <label>Brush Size:</label>
+  <input type="range" id="brushSize" min="1" max="10" value="2">
+  <label>Brush Color:</label>
+  <input type="color" id="brushColor" value="#ff0000">
+  <label>Shape Assist (hold Shift):</label>
+  <input type="checkbox" id="shapeAssist">
+  <label>Add Cube:</label>
+  <button onclick="addBlock()">Add Cube</button>
+  <label>Add Panel:</label>
+  <button onclick="addPanel('floor')">Add Floor Panel</button>
+  <button onclick="addPanel('wall')">Add Wall Panel</button>
+  <label>Panel Texture:</label>
+  <select id="panelTexture" onchange="switchPanelTexture(this.value)">
+    <option value="wood">Wood</option>
+    <option value="concrete">Concrete</option>
+    <option value="stone">Stone</option>
+    <option value="white">White Wall</option>
+    <option value="brick">Brick Wall</option>
+    <option value="pastel">Pastel Wall</option>
+    <option value="industrial">Industrial Wall</option>
+  </select>
+  <label>Move/Rotate Selected:</label>
+  <button onclick="enableTransform()">Enable Transform</button>
+  <button onclick="disableTransform()">Disable Transform</button>
+  <label>Snap/Grid:</label>
+  <input type="checkbox" id="snapGrid"> Enable Snap
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.155.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.155.0/examples/js/controls/TransformControls.js"></script>
+
+<script>
+// ===== Scene Setup =====
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000); // infinite black void
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight,0.1,5000);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+camera.position.set(0,20,50);
+controls.update();
+
+// ===== Lights =====
+const ambient = new THREE.AmbientLight(0xffffff,0.8);
+scene.add(ambient);
+const directional = new THREE.DirectionalLight(0xffffff,0.8);
+directional.position.set(50,50,50);
+scene.add(directional);
+
+// ===== Layers =====
+const layers = [new THREE.Group(), new THREE.Group(), new THREE.Group()];
+layers.forEach(l=>scene.add(l));
+let currentLayer = 0;
+function switchLayer(i){ currentLayer=i; }
+
+// ===== Drawing in 3D =====
+let isDrawing=false, lastPoint=null;
+const mouse = new THREE.Vector2(), raycaster = new THREE.Raycaster();
+const brushColorInput = document.getElementById("brushColor");
+const brushSizeInput = document.getElementById("brushSize");
+const shapeAssistInput = document.getElementById("shapeAssist");
+let shiftPressed=false;
+window.addEventListener('keydown', e=>{ if(e.key==='Shift') shiftPressed=true; });
+window.addEventListener('keyup', e=>{ if(e.key==='Shift') shiftPressed=false; });
+
+function getMousePos(event){
+  mouse.x = (event.clientX/window.innerWidth)*2-1;
+  mouse.y = -(event.clientY/window.innerHeight)*2+1;
+  raycaster.setFromCamera(mouse,camera);
+  const planeZ = new THREE.Plane(new THREE.Vector3(0,0,1),0);
+  const intersect = new THREE.Vector3();
+  raycaster.ray.intersectPlane(planeZ, intersect);
+  return intersect;
+}
+
+window.addEventListener('mousedown', ()=>{ isDrawing=true; lastPoint=null; });
+window.addEventListener('mouseup', ()=>{ isDrawing=false; lastPoint=null; });
+
+let actionStack=[], redoStack=[];
+
+window.addEventListener('mousemove',(e)=>{
+  if(!isDrawing) return;
+  const pos=getMousePos(e); if(!pos) return;
+  const color=brushColorInput.value;
+  const size=parseFloat(brushSizeInput.value);
+
+  if(lastPoint){
+    let start=lastPoint.clone(), end=pos.clone();
+    if(shapeAssistInput.checked && shiftPressed){
+      const dx=Math.abs(end.x-start.x), dy=Math.abs(end.y-start.y), dz=Math.abs(end.z-start.z);
+      if(dx>=dy && dx>=dz) { end.y=start.y; end.z=start.z; }
+      else if(dy>=dx && dy>=dz) { end.x=start.x; end.z=start.z; }
+      else { end.x=start.x; end.y=start.y; }
+    }
+    const mat=new THREE.LineBasicMaterial({color:color, linewidth:size});
+    const geo=new THREE.BufferGeometry().setFromPoints([start,end]);
+    const line=new THREE.Line(geo,mat);
+    layers[currentLayer].add(line);
+    actionStack.push({layer:currentLayer, object:line}); redoStack=[];
+  }
+  lastPoint=pos.clone();
+});
+
+// ===== 3D Blocks =====
+let selected=null;
+const transformControl = new THREE.TransformControls(camera,renderer.domElement);
+scene.add(transformControl);
+
+function addBlock(){
+  const geo=new THREE.BoxGeometry(2,2,2);
+  const mat=new THREE.MeshStandardMaterial({color:0x888888});
+  const cube=new THREE.Mesh(geo,mat);
+  cube.position.set(0,0,0);
+  layers[currentLayer].add(cube);
+  actionStack.push({layer:currentLayer, object:cube}); redoStack=[];
+}
+
+function enableTransform(){ if(selected) transformControl.attach(selected); }
+function disableTransform(){ transformControl.detach(); selected=null; }
+
+renderer.domElement.addEventListener('click', e=>{
+  const pos=getMousePos(e); if(!pos) return;
+  raycaster.setFromCamera(mouse,camera);
+  const intersects=[];
+  layers.forEach(l=>l.children.forEach(c=>intersects.push(...raycaster.intersectObject(c))));
+  if(intersects.length>0) selected=intersects[0].object;
+});
+
+// Snap/Grid
+const snapCheckbox=document.getElementById("snapGrid");
+transformControl.addEventListener('objectChange', ()=>{
+  if(snapCheckbox.checked && selected){
+    selected.position.x=Math.round(selected.position.x);
+    selected.position.y=Math.round(selected.position.y);
+    selected.position.z=Math.round(selected.position.z);
+  }
+});
+
+// Undo/Redo
+function undo(){ if(!actionStack.length) return; const a=actionStack.pop(); layers[a.layer].remove(a.object); redoStack.push(a); }
+function redo(){ if(!redoStack.length) return; const a=redoStack.pop(); layers[a.layer].add(a.object); actionStack.push(a); }
+
+// Save/Load
+function saveScene(){
+  const data=layers.map(l=>l.children.map(o=>({
+    type:o.type, position:o.position, color:o.material?.color?.getHex?.()
+  })));
+  const blob=new Blob([JSON.stringify(data)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download='scene.json'; a.click();
+}
+function loadScene(){
+  const input=document.createElement('input'); input.type='file';
+  input.onchange=e=>{
+    const file=e.target.files[0];
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      const data=JSON.parse(ev.target.result);
+      layers.forEach(l=>{ while(l.children.length) l.remove(l.children[0]); });
+      data.forEach((layerData,i)=>{
+        layerData.forEach(obj=>{
+          let mesh;
+          if(obj.type==='Line'){
+            const mat=new THREE.LineBasicMaterial({color:obj.color});
+            const geo=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(obj.position.x,obj.position.y,obj.position.z)]);
+            mesh=new THREE.Line(geo,mat);
+          }else{
+            const mat=new THREE.MeshStandardMaterial({color:obj.color});
+            mesh=new THREE.Mesh(new THREE.BoxGeometry(2,2,2),mat);
+            mesh.position.set(obj.position.x,obj.position.y,obj.position.z);
+          }
+          layers[i].add(mesh);
+        });
+      });
+    }
+    reader.readAsText(file);
+  }
+  input.click();
+}
+
+// ===== Panels (Walls/Floors) =====
+const loader = new THREE.TextureLoader();
+const textures = {
+  wood: loader.load('https://threejs.org/examples/textures/hardwood2_diffuse.jpg'),
+  concrete: loader.load('https://threejs.org/examples/textures/brick_diffuse.jpg'),
+  stone: loader.load('https://threejs.org/examples/textures/stone.jpg'),
+  white: loader.load('https://threejs.org/examples/textures/white.jpg'),
+  brick: loader.load('https://threejs.org/examples/textures/brick_diffuse.jpg'),
+  pastel: loader.load('https://threejs.org/examples/textures/pastel.jpg'),
+  industrial: loader.load('https://threejs.org/examples/textures/industrial.jpg')
+};
+let currentPanel=null;
+function addPanel(type){
+  const geo = new THREE.PlaneGeometry(type==='floor'?10:10, type==='floor'?10:5);
+  const mat = new THREE.MeshStandardMaterial({color:0xffffff, map:textures.wood, side:THREE.DoubleSide});
+  const panel = new THREE.Mesh(geo, mat);
+  panel.position.set(0,type==='floor'?0:-2,0);
+  if(type==='floor') panel.rotation.x = -Math.PI/2;
+  layers[currentLayer].add(panel);
+  currentPanel = panel;
+}
+function switchPanelTexture(name){
+  if(currentPanel) { currentPanel.material.map = textures[name]; currentPanel.material.needsUpdate=true; }
+}
+
+// ===== Animate =====
+function animate(){ requestAnimationFrame(animate); controls.update(); transformControl.update(); renderer.render(scene,camera); }
+animate();
+
+// ===== Resize =====
+window.addEventListener('resize', ()=>{
+  camera.aspect=window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
